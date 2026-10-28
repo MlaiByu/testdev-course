@@ -1,0 +1,4 @@
+# 仓库内统一按 LF 存储，避免 Windows/macOS/Linux 换行符打架
+* text=auto
+*.py text eol=lf
+*.md text eol=lf
