@@ -10,7 +10,14 @@
 """
 import allure
 
-from conftest import COOKIE_NAME, DEFAULT_PASSWORD, cookie_of, decode_jwt, make_email
+from conftest import (
+    COOKIE_NAME,
+    DEFAULT_PASSWORD,
+    cookie_of,
+    decode_jwt,
+    make_email,
+    new_session,
+)
 
 pytestmark = allure.feature("认证")
 
@@ -160,3 +167,68 @@ def test_logout_clears_cookie(logged_user, base_url):
     me = api.get(f"{base_url}/api/v1/auth/me")
     assert me.status_code == 401
     assert me.json()["code"] == 40100
+
+
+@allure.story("凭证失效")
+@allure.title("改密后旧 cookie 立即失效（token_version 机制）")
+def test_change_password_invalidates_old_token(logged_user, base_url):
+    """改密后已签发的凭证必须立即作废
+
+    背景：JWT 天生无状态，签出去就收不回来，没法像 session 那样「删掉服务端记录」。
+    项目用 token_version 解决：用户表存一个版本号，签发时写进 payload，
+    改密/封号时版本号 +1，校验时比对不上就拒 —— 相当于「一键踢下线」。
+
+    这条用例同时守住三件事，缺一件都可能漏 bug：
+    ① 旧凭证在同一个会话里失效
+    ② 旧凭证换一个全新会话也失效（证明是 token 作废，不是 session 被清了 cookie）
+    ③ 旧密码登不进、新密码能登进（证明密码真的改了）
+    """
+    me_url = f"{base_url}/api/v1/auth/me"
+    old_token = logged_user["token"]
+    old_password = logged_user["password"]
+    new_password = "NewPass123"
+
+    # ① 前置：改密前旧凭证可用（场景抵达证明）
+    with allure.step("前置：确认旧凭证当前可用"):
+        assert logged_user["api"].get(me_url).status_code == 200
+
+    # ② 动作：改密
+    with allure.step("修改密码"):
+        r = logged_user["api"].post(
+            f"{base_url}/api/v1/auth/change-password",
+            json={"old_password": old_password, "new_password": new_password},
+        )
+        assert r.status_code == 200, f"改密失败: {r.text}"
+        assert r.json()["code"] == 0
+
+    with allure.step("断言：同一会话里的旧凭证立即失效"):
+        me = logged_user["api"].get(me_url)
+        assert me.status_code == 401, "改密后旧凭证还能用，token_version 没生效"
+        assert me.json()["code"] == 40101
+        # 40101 有三种文案，改密场景是「已失效」，前端据此提示「请重新登录」
+        assert me.json()["message"] == "登录凭证已失效，请重新登录"
+
+    with allure.step("断言：旧凭证换一个全新会话同样无效"):
+        # 关键：同一个 session 失效可能只是因为服务端清了 cookie，
+        # 换个干净会话手动塞进去还能用的话，等于凭证根本没作废
+        ghost = new_session()
+        try:
+            ghost.cookies.set(COOKIE_NAME, old_token)
+            replay = ghost.get(me_url)
+            assert replay.status_code == 401, "旧凭证在别的会话里仍然可用，等于没作废"
+            assert replay.json()["code"] == 40101
+        finally:
+            ghost.close()
+
+    with allure.step("断言：旧密码登不进，新密码能登进"):
+        old_login = logged_user["api"].post(
+            f"{base_url}/api/v1/auth/login",
+            json={"account": logged_user["email"], "password": old_password},
+        )
+        assert old_login.status_code == 401, "旧密码还能登录，密码没真正改掉"
+
+        new_login = logged_user["api"].post(
+            f"{base_url}/api/v1/auth/login",
+            json={"account": logged_user["email"], "password": new_password},
+        )
+        assert new_login.status_code == 200, f"新密码登录失败: {new_login.text}"

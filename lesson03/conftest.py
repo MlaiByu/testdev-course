@@ -27,11 +27,11 @@ def make_phone():
     return "13" + str(uuid.uuid4().int)[:9]
 
 
-def new_session() -> requests.Session:
+def new_session():
     """trust_env=False 忽略系统代理（本机被代理接管会返回 502 假象）；
     不设全局 Content-Type——requests 会按 json=/data=/files= 自动决定，
     写死会让 data= 请求的头撒谎（头说 JSON，body 是表单）。"""
-    s = requests.Session()
+    s = requests.Session()      # requests.Session() 里有 cookiejar、连接池、默认头
     s.trust_env = False
     return s
 
