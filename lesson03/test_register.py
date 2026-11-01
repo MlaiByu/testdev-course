@@ -83,3 +83,51 @@ def test_register_xss_nickname(api, base_url, unique_email):
     )
     assert r.status_code == 201
     assert r.json()["data"]["nickname"] == "<img src=x>"
+
+
+@allure.story("注册")
+@allure.title("非法手机号：400 + 40001，errors 必须指到 phone 字段")
+@pytest.mark.parametrize(
+    "phone",
+    [
+        "1280013800",      # 10 位：少一位
+        "138001380",       # 9 位：少两位
+        "138001380000",    # 12 位：多一位
+        "1380013800a",     # 含字母
+        "22800138000",     # 11 位但第二位是 2，不满足 1[3-9]
+    ],
+)
+def test_register_invalid_phone(api, base_url, unique_email, phone):
+    """API04 手机号格式非法：契约要求 ^1[3-9]\\d{9}$
+
+    参数化而不是复制 5 遍：数据不同、逻辑相同，正是参数化的用武之地。
+    断言 errors 里的 field 必须是 phone —— 只断言 400 不够，
+    因为「400 但指错了字段」对前端毫无帮助。
+    """
+    r = api.post(
+        f"{base_url}/api/v1/auth/register",
+        json={"email": unique_email, "password": DEFAULT_PASSWORD, "phone": phone},
+    )
+    assert r.status_code == 400, f"非法手机号 {phone!r} 应被拒，实际 {r.status_code}"
+    body = r.json()
+    assert body["code"] == 40001
+    assert body["message"] == "参数校验失败"
+    fields = [e["field"] for e in body["data"]["errors"]]
+    assert "phone" in fields, f"错误没指到 phone 字段: {body['data']['errors']}"
+
+
+@allure.story("注册")
+@allure.title("空串手机号：归一为 null（实测行为，契约未记载）")
+def test_register_empty_phone_normalized_to_null(api, base_url, unique_email):
+    """空串 "" 被当成「没填」，落库为 null
+
+    契约只写了 phone 的格式 ^1[3-9]\\d{9}$ 且非必填，没写「空串怎么处理」。
+    实测：空串注册成功且存为 null。这条用例把**未记载的行为**钉住，
+    将来实现改成「空串报 40001」时，这里会红，提醒你契约该更新了。
+    """
+    r = api.post(
+        f"{base_url}/api/v1/auth/register",
+        json={"email": unique_email, "password": DEFAULT_PASSWORD, "phone": ""},
+    )
+    assert r.status_code == 201, f"空串手机号的处理方式变了: {r.text}"
+    assert r.json()["data"]["phone"] is None, "空串应被归一为 null，不能存成空字符串"

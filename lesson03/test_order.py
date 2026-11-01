@@ -9,6 +9,7 @@
 不是写 teardown 去打扫共享数据。
 """
 import re
+import uuid
 from decimal import Decimal
 
 import allure
@@ -223,6 +224,110 @@ def test_other_users_order_is_invisible(order_ready, base_url, user_factory):
     # ③ 越权尝试不许改动数据：订单还在，且还是 pending
     detail = order_ready["api"].get(f"{base_url}/api/v1/orders/{mine}").json()["data"]
     assert detail["status"] == "pending"
+
+
+@allure.story("幂等")
+@allure.title("幂等键：同 key 同 body 重放 → 返回同一订单，库存只扣一次")
+def test_create_order_idempotent(order_ready, base_url):
+    """网络超时后客户端重试，绝不能变成两个订单
+
+    这是订单接口最容易被忽略、上线后最致命的机制：
+    用户手抖点两下、网关重发、客户端超时重试——都会造成同一个请求发两次。
+    没有幂等键，就是两个订单、两次扣库存、两次扣款。
+
+    实测还有一个细节：第二次请求时购物车项已经被第一次下单删掉了，
+    但仍返回 200 和同一订单 —— 说明幂等键的检查发生在购物车校验之前。
+    """
+    api = order_ready["api"]
+    sku = order_ready["sku"]
+    qty = order_ready["quantity"]
+    idem_key = str(uuid.uuid4())
+    headers = {"Idempotency-Key": idem_key}
+    body = {
+        "address_id": order_ready["address_id"],
+        "cart_item_ids": [order_ready["cart_item_id"]],
+    }
+
+    stock_before = _current_stock(api, base_url, sku)
+
+    with allure.step("第一次提交（正常下单）"):
+        first = api.post(f"{base_url}/api/v1/orders", json=body, headers=headers)
+        assert first.status_code == 200, f"首次下单失败: {first.text}"
+        first_order = first.json()["data"]
+
+    stock_after = _current_stock(api, base_url, sku)
+    assert stock_after == stock_before - qty, "首次下单应扣减库存"
+
+    with allure.step("用同一个幂等键重放（模拟客户端重试）"):
+        replay = api.post(f"{base_url}/api/v1/orders", json=body, headers=headers)
+        assert replay.status_code == 200, f"重放应成功返回原订单，实际 {replay.status_code}: {replay.text}"
+        replay_order = replay.json()["data"]
+
+    with allure.step("断言：同一个订单，不是新建的"):
+        assert replay_order["id"] == first_order["id"], "重放创建了新订单，幂等失效"
+        assert replay_order["order_no"] == first_order["order_no"]
+        assert replay_order["total_amount"] == first_order["total_amount"]
+
+    with allure.step("断言：库存没有被二次扣减"):
+        assert _current_stock(api, base_url, sku) == stock_after, "重放导致重复扣库存"
+
+    with allure.step("断言：库里只有一张订单"):
+        orders = api.get(
+            f"{base_url}/api/v1/orders", params={"status": "all"}
+        ).json()["data"]
+        assert orders["total"] == 1, f"应只有 1 张订单，实际 {orders['total']} 张"
+
+
+@allure.story("幂等")
+@allure.title("幂等键冲突：同 key 不同请求体 → 40903，且不产生第二张订单")
+def test_idempotency_key_conflict(order_ready, base_url):
+    """同一个 key 携带不同请求体，必须报 40903
+
+    为什么不能「静默返回第一个订单」：那会掩盖客户端的 bug
+    （比如复用了 key 但换了商品），用户以为下了 A 单，实际是 B 单。
+    """
+    api = order_ready["api"]
+    sku = order_ready["sku"]
+    idem_key = str(uuid.uuid4())
+    headers = {"Idempotency-Key": idem_key}
+
+    # ① 用 key 下第一单
+    first = api.post(
+        f"{base_url}/api/v1/orders",
+        json={
+            "address_id": order_ready["address_id"],
+            "cart_item_ids": [order_ready["cart_item_id"]],
+        },
+        headers=headers,
+    )
+    assert first.status_code == 200, f"首次下单失败: {first.text}"
+
+    # ② 再造一个购物车项，用同一个 key 提交不同请求体
+    added = api.post(
+        f"{base_url}/api/v1/cart", json={"sku_id": sku["id"], "quantity": 1}
+    )
+    assert added.status_code == 200, f"前置加购失败: {added.text}"
+
+    r = api.post(
+        f"{base_url}/api/v1/orders",
+        json={
+            "address_id": order_ready["address_id"],
+            "cart_item_ids": [added.json()["data"]["id"]],
+        },
+        headers=headers,
+    )
+
+    # ③ 断言
+    assert r.status_code == 409, f"同 key 不同 body 应 409，实际 {r.status_code}: {r.text}"
+    body = r.json()
+    assert body["code"] == 40903
+    assert body["message"] == "相同幂等键携带了不同的请求"
+
+    # ④ 冲突不能留下脏数据：订单仍只有一个，新建的购物车项还在
+    orders = api.get(f"{base_url}/api/v1/orders", params={"status": "all"}).json()["data"]
+    assert orders["total"] == 1, "幂等冲突不该产生新订单"
+    cart = api.get(f"{base_url}/api/v1/cart").json()["data"]
+    assert len(cart["items"]) == 1, "冲突后购物车项应保留，不能被清掉"
 
 
 def _add_address(api_ctx, base_url):
