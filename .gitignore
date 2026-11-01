@@ -19,3 +19,8 @@ __pycache__/
 
 # 环境变量与密钥（永远不要提交进仓库！）
 .env
+
+# Allure 报告产物（可随时重跑生成，不进仓库）
+allure-results/
+allure-report/
+allure-single/

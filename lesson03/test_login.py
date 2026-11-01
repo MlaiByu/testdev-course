@@ -8,9 +8,15 @@
 - 服务端 _extract_token 优先 cookie，其次兼容 Authorization: Bearer（供脚本调试）
 - 所以「登录成功」的断言也从「取 token」变成「验 Set-Cookie + 验 cookie 能用」
 """
+import allure
+
 from conftest import COOKIE_NAME, DEFAULT_PASSWORD, cookie_of, decode_jwt, make_email
 
+pytestmark = allure.feature("认证")
 
+
+@allure.story("登录")
+@allure.title("正常登录：200 + httpOnly cookie + 凭证内容正确 + cookie 可用")
 def test_login_success(api, base_url, unique_email):
     """API08 正常登录：200 + 下发 httpOnly cookie + 凭证内容正确 + cookie 可用"""
     # ① 前置：注册一个我掌握密码的账号（并证明场景已抵达）
@@ -65,6 +71,8 @@ def test_login_success(api, base_url, unique_email):
     assert me.json()["data"]["email"] == unique_email
 
 
+@allure.story("登录")
+@allure.title("密码错误：401 + 40100 + 与「账号不存在」一字不差的文案")
 def test_login_wrong_password(api, base_url, unique_email):
     """API09 密码错误：401 + 40100 + 与「账号不存在」一字不差的文案（反枚举）"""
     # ① 前置：账号必须真实存在，否则测的是「账号不存在」而不是「密码错误」
@@ -92,6 +100,8 @@ def test_login_wrong_password(api, base_url, unique_email):
     assert COOKIE_NAME not in r.cookies
 
 
+@allure.story("登录")
+@allure.title("账号不存在：401 + 40100（前置什么都不做，验证系统不多嘴）")
 def test_login_account_not_exist(api, base_url):
     """API10 账号不存在：401 + 40100 + 与「密码错误」一字不差的文案（反枚举）
 
@@ -111,6 +121,8 @@ def test_login_account_not_exist(api, base_url):
     assert body["data"] is None
 
 
+@allure.story("鉴权")
+@allure.title("Bearer 头兼容路径：服务端 _extract_token 支持，防止被误删")
 def test_auth_header_compat(api, base_url, auth_headers):
     """API11 Bearer 头兼容路径：服务端 _extract_token 明确支持，防止被误删
 
@@ -123,6 +135,8 @@ def test_auth_header_compat(api, base_url, auth_headers):
     assert r.json()["code"] == 0
 
 
+@allure.story("登出")
+@allure.title("退出登录：清除 cookie，之后访问受保护接口回到未登录态")
 def test_logout_clears_cookie(logged_user, base_url):
     """API12 退出登录：清除 cookie，之后访问受保护接口回到未登录态
 
